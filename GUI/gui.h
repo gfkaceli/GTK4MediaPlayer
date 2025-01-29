@@ -3,7 +3,7 @@
 
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
-#include "decoding.h"
+#include "../Decoding/decoding.h"
 
 void activate(GtkApplication *app, gpointer user_data);
 int command_line_cb(GtkApplication *app, GApplicationCommandLine *cmdline, gpointer user_data);

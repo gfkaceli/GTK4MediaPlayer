@@ -9,7 +9,7 @@
 #include <pulse/simple.h>
 #include <pulse/error.h>
 #include <pthread.h>
-#include "buffer.h"
+#include "../Buffer/buffer.h"
 
 typedef struct {
     char *input_filename;

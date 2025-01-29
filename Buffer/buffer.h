@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include "decoding.h"
+#include "../Decoding/decoding.h"
 
 // Video Buffer Structure
 typedef struct {

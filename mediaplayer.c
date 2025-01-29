@@ -1,6 +1,6 @@
-#include "buffer.h"
-#include "decoding.h"
-#include "gui.h"
+#include "Buffer/buffer.h"
+#include "Decoding/decoding.h"
+#include "GUI/gui.h"
 
 #define VIDEO_BUFFER_SIZE 20
 #define AUDIO_BUFFER_SIZE 8192
