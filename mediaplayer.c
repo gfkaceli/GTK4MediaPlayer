@@ -463,12 +463,24 @@ void *audioThread(void *args) {
     }
 
     // Main decoding loop
-    while (is_running && av_read_frame(format_context, packet) >= 0) {
-        if (!checkPauseState()) continue; // Check pause state
+    while (is_running) {
+        if (is_paused) {
+            checkPauseState();  // Wait while paused
+            continue;
+        }
+
+        if (av_read_frame(format_context, packet) < 0) {
+            break;  // Exit if no more frames to read
+        }
+
         if (packet->stream_index == audio_stream_index) {
             if (avcodec_send_packet(codec_context, packet) == 0) {
                 while (avcodec_receive_frame(codec_context, frame) == 0) {
-                    if (!checkPauseState()) break; // Handle pause during decoding
+                    if (is_paused) {
+                        checkPauseState();  // Wait while paused
+                        continue;
+                    }
+
                     int num_samples = swr_convert(swr_ctx, &output_buffer, 44100,
                                                   (const uint8_t **)frame->data, frame->nb_samples);
                     if (num_samples < 0) {
