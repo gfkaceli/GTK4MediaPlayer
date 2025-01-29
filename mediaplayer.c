@@ -19,6 +19,7 @@
 #define AUDIO_BUFFER_SIZE 8192
 
 volatile int is_running = 1;
+volatile int is_paused = 0; // Added to track pause state
 
 typedef struct {
   char *input_filename;
@@ -62,6 +63,23 @@ gboolean updateDisplay(GtkWidget *imageWidget);
 void onWindowDestroy(GtkWidget *widget, gpointer app);
 void activate(GtkApplication *app, gpointer user_data);
 
+// Pause and Resume Control
+void togglePause() {
+    is_paused = !is_paused;
+}
+
+// Update Threads to Handle Pause State
+bool checkPauseState() {
+    while (is_paused && is_running) {
+        usleep(10000);
+        pthread_cond_broadcast(&videoBuffer.notEmpty);
+        pthread_cond_broadcast(&audioBuffer.notEmpty);
+        pthread_cond_broadcast(&videoBuffer.notFull);
+        pthread_cond_broadcast(&audioBuffer.notFull);
+    }
+    return is_running;
+}
+
 // Circular Buffer Functions for Video
 void videoBufferInit(VideoBuffer *vb, int size) {
     vb->pixbufs = malloc(size * sizeof(GdkPixbuf *));
@@ -97,17 +115,25 @@ bool videoBufferPush(VideoBuffer *vb, GdkPixbuf *pixbuf) {
 
 bool videoBufferPop(VideoBuffer *vb, GdkPixbuf **pixbuf) {
     pthread_mutex_lock(&vb->mutex);
+
     while (vb->count == 0 && is_running) {
+        if (is_paused) {
+            pthread_mutex_unlock(&vb->mutex);
+            checkPauseState(); // Wait while paused
+            pthread_mutex_lock(&vb->mutex);
+        }
         pthread_cond_wait(&vb->notEmpty, &vb->mutex);
     }
+
     if (!is_running) {
         pthread_mutex_unlock(&vb->mutex);
         return false;
     }
+
     *pixbuf = vb->pixbufs[vb->start];
     vb->start = (vb->start + 1) % vb->size;
     vb->count--;
-    pthread_cond_signal(&vb->notFull);
+    pthread_cond_signal(&vb->notFull); // Notify that buffer space is available
     pthread_mutex_unlock(&vb->mutex);
     return true;
 }
@@ -172,25 +198,31 @@ bool audioBufferPush(AudioBuffer *ab, const uint8_t *data, size_t bytes) {
 
 bool audioBufferPop(AudioBuffer *ab, uint8_t *data, size_t bytes) {
     pthread_mutex_lock(&ab->mutex);
+
     while (ab->count < bytes && is_running) {
+        if (is_paused) {
+            pthread_mutex_unlock(&ab->mutex);
+            checkPauseState(); // Wait while paused
+            pthread_mutex_lock(&ab->mutex);
+        }
         pthread_cond_wait(&ab->notEmpty, &ab->mutex);
     }
+
     if (!is_running) {
         pthread_mutex_unlock(&ab->mutex);
         return false;
     }
 
-     size_t bytes_to_read = bytes <= ab->count ? bytes : ab->count; // Read only as much as available
-
-    for (size_t i = 0; i < bytes_to_read; i++) {
-        data[i] = ab->buffer[(ab->read_pos + i) % ab->size];
-    }
+    size_t bytes_to_read = (bytes <= ab->count) ? bytes : ab->count;
+    memcpy(data, ab->buffer + ab->read_pos, bytes_to_read);
     ab->read_pos = (ab->read_pos + bytes_to_read) % ab->size;
     ab->count -= bytes_to_read;
-    pthread_cond_signal(&ab->notFull); //signal that buffer has space
+
+    pthread_cond_signal(&ab->notFull); // Notify that buffer space is available
     pthread_mutex_unlock(&ab->mutex);
     return true;
 }
+
 
 // Threads
 /*
@@ -210,36 +242,37 @@ void *videoThread(void *args) {
     int video_stream_index = -1;
 
     avformat_network_init();
-    if(avformat_open_input(&format_context, input_file, NULL, NULL) > 0){
-        fprintf(stderr, "Error: could not load the input file '%s' \n", input_file );
+    if (avformat_open_input(&format_context, input_file, NULL, NULL) > 0) {
+        fprintf(stderr, "Error: Could not open input file '%s'\n", input_file);
         return NULL;
     }
 
-    if(avformat_find_stream_info(format_context, NULL) < 0){
+    if (avformat_find_stream_info(format_context, NULL) < 0) {
         fprintf(stderr, "Error: Could not find stream information\n");
         avformat_close_input(&format_context);
         return NULL;
     }
-    // Find the video stream
+
     for (int i = 0; i < format_context->nb_streams; i++) {
         if (format_context->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
             video_stream_index = i;
             break;
         }
     }
+
     if (video_stream_index == -1) {
-        fprintf(stderr, "Error: Could not find a video stream\n");
+        fprintf(stderr, "Error: No video stream found\n");
         avformat_close_input(&format_context);
         return NULL;
     }
 
-    // Initialize the codec
     codec = avcodec_find_decoder(format_context->streams[video_stream_index]->codecpar->codec_id);
     if (!codec) {
         fprintf(stderr, "Error: Codec not found\n");
         avformat_close_input(&format_context);
         return NULL;
     }
+
     codec_context = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(codec_context, format_context->streams[video_stream_index]->codecpar);
     if (avcodec_open2(codec_context, codec, NULL) < 0) {
@@ -249,12 +282,11 @@ void *videoThread(void *args) {
         return NULL;
     }
 
-    // Allocate necessary structures
     AVPacket *packet = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
     AVFrame *rgb_frame = av_frame_alloc();
     if (!packet || !frame || !rgb_frame) {
-        fprintf(stderr, "Error: Could not allocate frames or packets\n");
+        fprintf(stderr, "Error: Memory allocation failed\n");
         av_packet_free(&packet);
         av_frame_free(&frame);
         av_frame_free(&rgb_frame);
@@ -263,15 +295,28 @@ void *videoThread(void *args) {
         return NULL;
     }
 
-    //main decoding loop
+    while (is_running) {
+        if (is_paused) {
+            checkPauseState();  // Wait while paused
+            continue;
+        }
 
-     while (is_running && av_read_frame(format_context, packet) >= 0) {
+        if (av_read_frame(format_context, packet) < 0) {
+            break;  // Exit if no more frames to read
+        }
+
         if (packet->stream_index == video_stream_index) {
             if (avcodec_send_packet(codec_context, packet) < 0) {
                 fprintf(stderr, "Error: Failed to send packet for decoding\n");
                 break;
             }
-            while (is_running && avcodec_receive_frame(codec_context, frame) >= 0) {
+
+            while (avcodec_receive_frame(codec_context, frame) >= 0) {
+                if (is_paused) {
+                    checkPauseState();  // Wait while paused
+                    continue;
+                }
+
                 if (!sws_ctx) {
                     sws_ctx = sws_getContext(
                         frame->width, frame->height, codec_context->pix_fmt,
@@ -287,7 +332,6 @@ void *videoThread(void *args) {
                 sws_scale(sws_ctx, (const uint8_t *const *)frame->data, frame->linesize,
                           0, frame->height, rgb_frame->data, rgb_frame->linesize);
 
-                // Convert to GdkPixbuf
                 GdkPixbuf *pixbuf = gdk_pixbuf_new_from_data(
                     rgb_frame->data[0], GDK_COLORSPACE_RGB, FALSE, 8,
                     frame->width, frame->height, rgb_frame->linesize[0],
@@ -295,17 +339,16 @@ void *videoThread(void *args) {
 
                 if (pixbuf) {
                     videoBufferPush(&videoBuffer, pixbuf);
-                    g_object_unref(pixbuf); // Decrease reference count
+                    g_object_unref(pixbuf);
                 } else {
-                    fprintf(stderr, "Error: Failed to create GdkPixbuf\n");
                     av_free(buffer);
                 }
             }
         }
+
         av_packet_unref(packet);
     }
 
-    // Cleanup
     av_packet_free(&packet);
     av_frame_free(&frame);
     av_frame_free(&rgb_frame);
@@ -421,9 +464,11 @@ void *audioThread(void *args) {
 
     // Main decoding loop
     while (is_running && av_read_frame(format_context, packet) >= 0) {
+        if (!checkPauseState()) continue; // Check pause state
         if (packet->stream_index == audio_stream_index) {
             if (avcodec_send_packet(codec_context, packet) == 0) {
                 while (avcodec_receive_frame(codec_context, frame) == 0) {
+                    if (!checkPauseState()) break; // Handle pause during decoding
                     int num_samples = swr_convert(swr_ctx, &output_buffer, 44100,
                                                   (const uint8_t **)frame->data, frame->nb_samples);
                     if (num_samples < 0) {
@@ -466,14 +511,16 @@ void *audioThread(void *args) {
   callback for our animation functionality
 */
 gboolean updateDisplay(GtkWidget *image_widget) {
-  GdkPixbuf *pixbuf;
-  if (videoBufferPop(&videoBuffer, &pixbuf)) {
-    GdkPaintable *paintable =  (GdkPaintable *)gdk_texture_new_for_pixbuf(pixbuf); // Convert to GdkPaintable
-    gtk_image_set_from_paintable(GTK_IMAGE(image_widget), paintable); // Use updated function
-    g_object_unref(paintable); // Decrease reference count of paintable
-    g_object_unref(pixbuf); // Decrease reference count after setting it
-  }
-  return G_SOURCE_CONTINUE;
+    if (!is_paused) { // Only update if playing
+        GdkPixbuf *pixbuf;
+        if (videoBufferPop(&videoBuffer, &pixbuf)) {
+            GdkPaintable *paintable =  (GdkPaintable *)gdk_texture_new_for_pixbuf(pixbuf); // Convert to GdkPaintable
+            gtk_image_set_from_paintable(GTK_IMAGE(image_widget), paintable); // Use updated function
+            g_object_unref(paintable); // Decrease reference count of paintable
+            g_object_unref(pixbuf); // Decrease reference count after setting it
+        }
+    }
+    return G_SOURCE_CONTINUE;
 }
 
 static int command_line_cb(GtkApplication *app,
@@ -506,25 +553,77 @@ void onWindowDestroy(GtkWidget *widget, gpointer app) {
     g_application_quit(G_APPLICATION(app));
 }
 
-void activate(GtkApplication *app, gpointer user_data) {
-    DecodeData *data = (DecodeData *)user_data;
-    GtkWidget *window, *scrolled_window, *image_widget;
 
+// GTK Button Callback
+void onPausePlayToggle(GtkButton *button, gpointer user_data) {
+    togglePause();
+
+    // If a valid button reference is passed, update its label
+    if (button != NULL) {
+        gtk_button_set_label(button, is_paused ? "Play" : "Pause");
+    }
+
+    if (!is_paused) {
+        // Notify all threads to resume from pause
+        pthread_cond_broadcast(&videoBuffer.notEmpty);
+        pthread_cond_broadcast(&audioBuffer.notEmpty);
+    }
+}
+
+// Handle key press events
+// Handle key press events using GtkEventControllerKey
+gboolean onKeyPress(GtkEventController *controller, guint keyval, guint keycode, GdkModifierType state, gpointer user_data) {
+    if (keyval == GDK_KEY_space) {  // Spacebar is pressed
+        onPausePlayToggle(NULL, NULL);  // Toggle Play/Pause
+        return TRUE;  // Event handled, stop propagation
+    }
+    return FALSE;  // Let other key events propagate
+}
+
+
+void activate(GtkApplication *app, gpointer user_data) {
+        DecodeData *data = (DecodeData *)user_data;
+    GtkWidget *window, *main_box, *scrolled_window, *image_widget, *button_box, *pause_button;
+    GtkEventController *key_controller;  // Declare the key event controller
+
+    // Create the main application window
     window = gtk_application_window_new(app);
-    gtk_window_set_title(GTK_WINDOW(window), "Frame Display");
+    gtk_window_set_title(GTK_WINDOW(window), "Media Player");
     gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
 
+    // Create a key event controller
+    key_controller = gtk_event_controller_key_new();
+    g_signal_connect(key_controller, "key-pressed", G_CALLBACK(onKeyPress), NULL);
+    gtk_widget_add_controller(window, key_controller);  // Attach the controller to the window
+
+    // Create a vertical box to hold the image and controls
+    main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_window_set_child(GTK_WINDOW(window), main_box);
+
+    // Create a scrolled window for video display
     scrolled_window = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window),
-                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(scrolled_window, 800, 450); // Set a fixed size for the display
     image_widget = gtk_image_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window),
-                                image_widget);
-    gtk_window_set_child(GTK_WINDOW(window), scrolled_window);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled_window), image_widget);
+    gtk_box_append(GTK_BOX(main_box), scrolled_window);
+
+    // Create a horizontal box for controls
+    button_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(main_box), button_box);
+
+    // Create a Play/Pause button
+    pause_button = gtk_button_new_with_label("Pause");
+    g_signal_connect(pause_button, "clicked", G_CALLBACK(onPausePlayToggle), NULL);
+    gtk_box_append(GTK_BOX(button_box), pause_button);
+
+    // Connect destroy signal to clean up on window close
     g_signal_connect(window, "destroy", G_CALLBACK(onWindowDestroy), app);
-    // Setup periodic update
-    g_timeout_add(1000 / data->frame_rate, (GSourceFunc)updateDisplay,
-                image_widget);
+
+    // Start updating the display periodically
+    g_timeout_add(1000 / data->frame_rate, (GSourceFunc)updateDisplay, image_widget);
+
     gtk_widget_set_visible(window, true);
 }
 
