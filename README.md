@@ -62,13 +62,6 @@ GTK4 Media Player is a simple media player built with **GTK4**, **FFmpeg**, and 
   - Video and audio are handled in separate threads to ensure smooth playback.
   - Circular buffers synchronize the producer (decoder) and consumer (player).
 
-## Project Structure
-
-```plaintext
-.
-├── mediaplayer.c   # Main source file
-├── README.md       # Documentation
-```
 
 ## Known Issues
 ```plaintext
@@ -76,5 +69,5 @@ Feel free to document any issues
 ```
 
 - **WSL Graphics**: Ensure WSLg is enabled for GPU rendering when using WSL.
-- **Format Support**: Limited to formats supported by FFmpeg.
+- **Format Support**: Limited to formats supported by FFmpeg library.
 
