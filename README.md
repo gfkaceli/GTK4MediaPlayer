@@ -35,9 +35,7 @@ GTK4 Media Player is a simple media player built with **GTK4**, **FFmpeg**, and 
 
 3. **Compile the Program**:
    ```bash
-   gcc mediaplayer.c -o mediaplayer \
-   `pkg-config --cflags --libs gtk4 libavformat libavcodec libavutil libswscale libswresample` \
-   -lpulse-simple -lpulse -pthread
+   gcc mediaplayer.c Buffer/buffer.c Decoding/decoding.c GUI/gui.c -o mediaplayer $(pkg-config --cflags --libs gtk4 libpulse-simple libpulse libavcodec libavformat libavutil libswresample libswscale) -lpthread
    ```
 
 4. **Run the Program**:
@@ -46,7 +44,7 @@ GTK4 Media Player is a simple media player built with **GTK4**, **FFmpeg**, and 
    ```
    Example:
    ```bash
-   ./mediaplayer sample.mp4 30
+   ./mediaplayer video_audio_samples/sample.mp4 30
    ```
 
 ## How It Works
@@ -73,6 +71,9 @@ GTK4 Media Player is a simple media player built with **GTK4**, **FFmpeg**, and 
 ```
 
 ## Known Issues
+```plaintext
+Feel free to document any issues
+```
 
 - **WSL Graphics**: Ensure WSLg is enabled for GPU rendering when using WSL.
 - **Format Support**: Limited to formats supported by FFmpeg.
